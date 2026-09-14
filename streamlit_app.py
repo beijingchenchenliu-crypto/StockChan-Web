@@ -52,7 +52,8 @@ try:
     from core.channel import line_value
 except (ImportError, ModuleNotFoundError):
     def line_value(line_dict: dict, x_val: float) -> float:
-        x1, y1 = line_dict.get("x1", 0), line_dict.get("y1", 0.0)
+        x1 = line_dict.get("x1", 0)
+        y1 = line_dict.get("y1", 0.0)
         slope = line_dict.get("slope", 0.0)
         return float(y1 + slope * (x_val - x1))
 
@@ -335,7 +336,7 @@ if show_bi and len(bi_points) >= 2:
         name="笔/线段",
     ), row=1, col=1)
 
-# ===================== 原版支撑阻力位算法 =====================
+# ===================== 支撑阻力位算法 =====================
 close_arr = pd.to_numeric(frame["close"], errors="coerce").to_numpy(dtype=float)
 highs_arr = pd.to_numeric(frame["high"], errors="coerce").to_numpy(dtype=float)
 lows_arr = pd.to_numeric(frame["low"], errors="coerce").to_numpy(dtype=float)
@@ -431,7 +432,7 @@ if show_wave and waves:
                 row=1, col=1
             )
 
-# 9. 形态通道与参数统计标注（完全规避跨行 f-string 语法错误）
+# 9. 形态通道与参数统计标注（完全规避任何字符串语法报错）
 channel = getattr(result, "channel", None)
 if show_channel and channel and getattr(channel, "valid", False):
     items_to_draw = []
@@ -449,7 +450,7 @@ if show_channel and channel and getattr(channel, "valid", False):
             items_to_draw.append((s_struct, False))
             
     for struct, is_primary in items_to_draw:
-        st_state = getattr(struct, "status", "candidate")
+        st_state = str(getattr(struct, "status", "candidate"))
         up = getattr(struct, "upper_line", {})
         lo = getattr(struct, "lower_line", {})
         if up and lo:
@@ -475,15 +476,18 @@ if show_channel and channel and getattr(channel, "valid", False):
                 name="通道下轨",
             ), row=1, col=1)
             
-            prefix = "【主结构】" if is_primary else "【局部】"
-            lbl = getattr(struct, "label", "整理")
-            u_tc = up.get("touch_count", 0)
-            l_tc = lo.get("touch_count", 0)
-            tot_tc = getattr(struct, "touch_count", 0)
+            prefix_str = "【主结构】" if is_primary else "【局部】"
+            lbl_str = str(getattr(struct, "label", "整理"))
+            u_cnt = up.get("touch_count", 0)
+            l_cnt = lo.get("touch_count", 0)
+            tot_cnt = getattr(struct, "touch_count", 0)
             f_span = getattr(struct, "fit_span", 0)
-            b_up = getattr(struct, "breakout_up_level", 0.0)
-            b_down = getattr(struct, "breakdown_level", 0.0)
+            b_up = float(getattr(struct, "breakout_up_level", 0.0))
+            b_down = float(getattr(struct, "breakdown_level", 0.0))
             
-            # 使用单行与 BR 拼接，杜绝任何语法截断风险
-            struct_info_text = (
-                "**" + str(prefix) + " " + str(lbl) + "(" + str(st_state) + ")**
+            lines_list = [
+                f"**{prefix_str} {lbl_str}({st_state})**",
+                f"触点: 上{u_cnt}/下{l_cnt}共{tot_cnt}次 | 跨度: {f_span}根",
+                f"阻力/突破位: {b_up:.2f} | 支撑位: {b_down:.2f}",
+            ]
+            struct_info_text = "
