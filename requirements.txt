@@ -1,0 +1,26 @@
+# ============================================================
+#  StockChan —— 股票 / 指数技术分析工具
+#  依赖清单
+#
+#  环境要求: Python >= 3.10
+#  安装方式: pip install -r requirements.txt
+#  国内加速: pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# ============================================================
+
+# ---------- 数据处理 ----------
+pandas>=2.0.0
+numpy>=1.24.0
+requests>=2.31.0
+
+# ---------- 行情数据源 (A股指数 / ETF / 个股) ----------
+# akshare 会自动携带 requests / beautifulsoup4 / lxml 等依赖
+akshare>=1.12.0
+
+# ---------- 桌面可视化 ----------
+PyQt6>=6.5.0
+pyqtgraph>=0.13.3
+
+# ---------- Web / PWA 前端 ----------
+# 保留桌面端依赖，使同一份项目可运行 PyQt6 客户端或云端 Streamlit 服务。
+streamlit>=1.38.0
+plotly>=5.24.0
