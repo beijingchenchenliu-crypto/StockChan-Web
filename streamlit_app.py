@@ -432,7 +432,7 @@ if show_wave and waves:
                 row=1, col=1
             )
 
-# 9. 形态通道与参数统计标注（完全规避任何字符串语法报错）
+# 9. 形态通道与参数统计标注（完全规避任何字符串断裂语法风险）
 channel = getattr(result, "channel", None)
 if show_channel and channel and getattr(channel, "valid", False):
     items_to_draw = []
@@ -485,9 +485,6 @@ if show_channel and channel and getattr(channel, "valid", False):
             b_up = float(getattr(struct, "breakout_up_level", 0.0))
             b_down = float(getattr(struct, "breakdown_level", 0.0))
             
-            lines_list = [
-                f"**{prefix_str} {lbl_str}({st_state})**",
-                f"触点: 上{u_cnt}/下{l_cnt}共{tot_cnt}次 | 跨度: {f_span}根",
-                f"阻力/突破位: {b_up:.2f} | 支撑位: {b_down:.2f}",
-            ]
-            struct_info_text = "
+            # 使用列表 join，完全杜绝引号未闭合语法问题
+            struct_info_text = "".join([
+                "**", prefix_str, " ", lbl_str, "(", st_state, ")**
