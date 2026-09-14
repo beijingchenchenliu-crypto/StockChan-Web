@@ -82,7 +82,6 @@ st.markdown(
 
 KIND_MAP = {"指数": "index", "个股": "stock", "ETF": "etf"}
 
-# 增加「周线」和「月线」支持
 PERIOD_MAP: dict[str, dict] = {
     "60分钟": {"type": "min", "val": "60", "key": "min"},
     "30分钟": {"type": "min", "val": "30", "key": "min"},
@@ -212,7 +211,7 @@ fig = make_subplots(
     row_heights=[0.76, 0.24],
 )
 
-# 1. 蜡烛图（连续索引坐标，红涨绿跌）
+# 1. 蜡烛图
 fig.add_trace(go.Candlestick(
     x=x_indices, open=frame["open"], high=frame["high"], low=frame["low"], close=frame["close"],
     name="K线",
@@ -228,7 +227,6 @@ if show_bull_bear:
         x=x_indices, y=bull_bear_series, mode="lines",
         line=dict(color="#7B1FA2", width=2.2), name="牛熊分界线"
     ), row=1, col=1)
-    # 末端标牌
     last_val = float(bull_bear_series.iloc[-1])
     fig.add_annotation(
         x=total_bars - 1, y=last_val, text="牛熊分界线",
@@ -255,7 +253,7 @@ if show_vwap:
 
 shapes = []
 
-# 5. 未补跳空缺口
+# 5. 跳空缺口
 if show_gaps and total_bars >= 2:
     highs = frame["high"].to_numpy(dtype=float)
     lows = frame["low"].to_numpy(dtype=float)
@@ -337,7 +335,7 @@ if show_bi and len(bi_points) >= 2:
         name="笔/线段",
     ), row=1, col=1)
 
-# ===================== 原版支撑阻力位算法 (_plot_support_resistance_lines) =====================
+# ===================== 原版支撑阻力位算法 =====================
 close_arr = pd.to_numeric(frame["close"], errors="coerce").to_numpy(dtype=float)
 highs_arr = pd.to_numeric(frame["high"], errors="coerce").to_numpy(dtype=float)
 lows_arr = pd.to_numeric(frame["low"], errors="coerce").to_numpy(dtype=float)
@@ -433,7 +431,7 @@ if show_wave and waves:
                 row=1, col=1
             )
 
-# 9. 形态通道与参数统计标注
+# 9. 形态通道与参数统计标注（完全规避跨行 f-string 语法错误）
 channel = getattr(result, "channel", None)
 if show_channel and channel and getattr(channel, "valid", False):
     items_to_draw = []
@@ -477,7 +475,15 @@ if show_channel and channel and getattr(channel, "valid", False):
                 name="通道下轨",
             ), row=1, col=1)
             
-            # 原版右侧参数详细文本块
             prefix = "【主结构】" if is_primary else "【局部】"
+            lbl = getattr(struct, "label", "整理")
+            u_tc = up.get("touch_count", 0)
+            l_tc = lo.get("touch_count", 0)
+            tot_tc = getattr(struct, "touch_count", 0)
+            f_span = getattr(struct, "fit_span", 0)
+            b_up = getattr(struct, "breakout_up_level", 0.0)
+            b_down = getattr(struct, "breakdown_level", 0.0)
+            
+            # 使用单行与 BR 拼接，杜绝任何语法截断风险
             struct_info_text = (
-                f"**{prefix} {getattr(struct, 'label', '整理')}({st_state})**
+                "**" + str(prefix) + " " + str(lbl) + "(" + str(st_state) + ")**
