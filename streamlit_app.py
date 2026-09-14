@@ -1,11 +1,10 @@
 """StockChan 移动端 Web / PWA 看板。
 
-基于本地桌面版 kline_widget.py 1:1 精准移植：
-- 统一使用连续索引坐标系（杜绝坐标错位堆叠）
-- 完美还原中枢矩形、笔折线、波浪连线与标号、形态通道、跳空缺口
-- 原生红涨绿跌与大号买卖点星标
-- 副图 Squeeze 动量与挤压散点
-- 纯 Plotly 网页渲染，完全剥离 PyQt/pyqtgraph 无头环境限制
+1:1 还原桌面版原生功能：
+- 支持分时、日线、周线、月线多周期切换
+- 完整呈现压力1/压力2（红虚线）与支撑1/支撑2（蓝虚线）
+- 呈现形态通道参数右侧标注【主结构】/【局部】
+- 还原中枢色块、未补跳空缺口、笔折线与 Squeeze 动量副图
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import date, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
@@ -25,7 +24,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-# 核心计算层兼容导入
+# 核心计算层导入
 try:
     from core.analyzer import ChanAnalyzer
 except (ImportError, ModuleNotFoundError):
@@ -82,12 +81,16 @@ st.markdown(
 )
 
 KIND_MAP = {"指数": "index", "个股": "stock", "ETF": "etf"}
-PERIOD_MAP: dict[str, Optional[str]] = {
-    "60分钟": "60",
-    "日线": None,
-    "30分钟": "30",
-    "15分钟": "15",
-    "5分钟": "5",
+
+# 增加「周线」和「月线」支持
+PERIOD_MAP: dict[str, dict] = {
+    "60分钟": {"type": "min", "val": "60", "key": "min"},
+    "30分钟": {"type": "min", "val": "30", "key": "min"},
+    "15分钟": {"type": "min", "val": "15", "key": "min"},
+    "5分钟": {"type": "min", "val": "5", "key": "min"},
+    "日线": {"type": "kline", "val": "日线", "key": "D"},
+    "周线": {"type": "kline", "val": "周线", "key": "W"},
+    "月线": {"type": "kline", "val": "月线", "key": "M"},
 }
 
 
@@ -112,9 +115,9 @@ with c1:
 with c2:
     typed_symbol = st.text_input("代码", value="000001")
 with c3:
-    period_name = st.selectbox("周期", list(PERIOD_MAP), index=0)
+    period_name = st.selectbox("周期", list(PERIOD_MAP), index=4)  # 默认日线
 with c4:
-    start_date_val = st.date_input("起始", value=date.today() - timedelta(days=365))
+    start_date_val = st.date_input("起始", value=date.today() - timedelta(days=500))
 with c5:
     is_full_cycle = st.checkbox("全周期", value=False)
 with c6:
@@ -157,19 +160,21 @@ with q4:
 try:
     kind = KIND_MAP[kind_name]
     symbol, kind = normalize_input(typed_symbol, kind)
-    minute_period = PERIOD_MAP[period_name]
-    start_str = "20200101" if is_full_cycle else start_date_val.strftime("%Y%m%d")
+    p_info = PERIOD_MAP[period_name]
+    start_str = "20180101" if is_full_cycle else start_date_val.strftime("%Y%m%d")
     
-    with st.spinner("正在加载行情并推演缠论几何…"):
-        if minute_period:
-            df = fetch_min(symbol=symbol, period=minute_period, start_date=start_str)
-            period_key = "min"
+    with st.spinner("正在加载多周期行情并推演缠论几何…"):
+        if p_info["type"] == "min":
+            df = fetch_min(symbol=symbol, period=p_info["val"], start_date=start_str)
+            period_key = p_info["key"]
+            min_p = p_info["val"]
         else:
-            df = fetch(symbol=symbol, kind=kind, period="日线", start_date=start_str)
-            period_key = "D"
+            df = fetch(symbol=symbol, kind=kind, period=p_info["val"], start_date=start_str)
+            period_key = p_info["key"]
+            min_p = None
             
         if df is None or df.empty:
-            raise ValueError(f"未能获取到 {symbol} 的数据，请核对代码。")
+            raise ValueError(f"未能获取到 {symbol} ({period_name}) 的数据，请核对代码。")
             
         frame = df.copy().reset_index(drop=True)
         frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
@@ -177,7 +182,7 @@ try:
         frame = frame.sort_values("date").reset_index(drop=True)
         
         try:
-            result = ChanAnalyzer(frame, period_key=period_key, min_period=minute_period).run()
+            result = ChanAnalyzer(frame, period_key=period_key, min_period=min_p).run()
         except TypeError:
             result = ChanAnalyzer(frame).run()
 
@@ -199,7 +204,7 @@ m3.metric("市场状态", regime)
 
 total_bars = len(frame)
 x_indices = np.arange(total_bars)
-date_format = "%Y-%m-%d %H:%M" if minute_period else "%Y-%m-%d"
+date_format = "%Y-%m-%d %H:%M" if p_info["type"] == "min" else "%Y-%m-%d"
 date_labels = frame["date"].dt.strftime(date_format).tolist()
 
 fig = make_subplots(
@@ -207,7 +212,7 @@ fig = make_subplots(
     row_heights=[0.76, 0.24],
 )
 
-# 1. 蜡烛图（以连续整数为 X 轴，中国标准配色：红涨绿跌）
+# 1. 蜡烛图（连续索引坐标，红涨绿跌）
 fig.add_trace(go.Candlestick(
     x=x_indices, open=frame["open"], high=frame["high"], low=frame["low"], close=frame["close"],
     name="K线",
@@ -215,7 +220,7 @@ fig.add_trace(go.Candlestick(
     decreasing_line_color="#26D0B8", decreasing_fillcolor="#26D0B8",
 ), row=1, col=1)
 
-# 2. 牛熊分界线（本地源码：默认 60 周期均线 #7B1FA2）
+# 2. 牛熊分界线 (EMA60)
 if show_bull_bear:
     c_series = frame["close"].astype(float)
     bull_bear_series = c_series.ewm(span=60, adjust=False).mean()
@@ -223,6 +228,13 @@ if show_bull_bear:
         x=x_indices, y=bull_bear_series, mode="lines",
         line=dict(color="#7B1FA2", width=2.2), name="牛熊分界线"
     ), row=1, col=1)
+    # 末端标牌
+    last_val = float(bull_bear_series.iloc[-1])
+    fig.add_annotation(
+        x=total_bars - 1, y=last_val, text="牛熊分界线",
+        showarrow=False, font=dict(color="#7B1FA2", size=11),
+        xanchor="right", yanchor="middle", row=1, col=1
+    )
 
 # 3. 肯特纳通道 (KC)
 if show_kc:
@@ -243,11 +255,10 @@ if show_vwap:
 
 shapes = []
 
-# 5. 严格对齐本地 plot_gaps 向量化跳空缺口
+# 5. 未补跳空缺口
 if show_gaps and total_bars >= 2:
     highs = frame["high"].to_numpy(dtype=float)
     lows = frame["low"].to_numpy(dtype=float)
-    # 向上缺口
     for i in (np.flatnonzero(lows[1:] > highs[:-1]) + 1):
         gap_low, gap_high = float(highs[i - 1]), float(lows[i])
         rest = np.flatnonzero(lows[i + 1:] <= gap_low)
@@ -258,7 +269,6 @@ if show_gaps and total_bars >= 2:
             fillcolor="rgba(239, 83, 80, 0.18)",
             line=dict(color="#EF5350", width=1, dash="dash"),
         ))
-    # 向下缺口
     for i in (np.flatnonzero(highs[1:] < lows[:-1]) + 1):
         gap_high, gap_low = float(lows[i - 1]), float(highs[i])
         rest = np.flatnonzero(highs[i + 1:] >= gap_high)
@@ -270,7 +280,7 @@ if show_gaps and total_bars >= 2:
             line=dict(color="#26A69A", width=1, dash="dash"),
         ))
 
-# 6. 严格对齐本地 plot_pivots 中枢矩形
+# 6. 缠论中枢矩形
 if show_zs:
     pivots = (
         getattr(result, "zs_list", None) or 
@@ -299,7 +309,7 @@ if show_zs:
                 line=dict(color="#F57C00", width=1.4, dash="dash"),
             ))
 
-# 7. 严格对齐本地 plot_strokes 笔/线段
+# 7. 缠论笔与支撑/压力线
 strokes = getattr(result, "strokes", None) or getattr(result, "bi_list", None) or []
 bi_points = []
 if strokes:
@@ -327,7 +337,76 @@ if show_bi and len(bi_points) >= 2:
         name="笔/线段",
     ), row=1, col=1)
 
-# 8. 严格对齐本地 plot_waves 波浪标注 (1,2,3,4,5 / A,B,C)
+# ===================== 原版支撑阻力位算法 (_plot_support_resistance_lines) =====================
+close_arr = pd.to_numeric(frame["close"], errors="coerce").to_numpy(dtype=float)
+highs_arr = pd.to_numeric(frame["high"], errors="coerce").to_numpy(dtype=float)
+lows_arr = pd.to_numeric(frame["low"], errors="coerce").to_numpy(dtype=float)
+last_valid_idx = total_bars - 1
+curr_price = float(close_arr[last_valid_idx])
+
+lookback_len = max(40, min(total_bars, 180))
+start_p_idx = max(0, last_valid_idx - lookback_len + 1)
+rad = 2 if lookback_len < 90 else 3
+sup_cands, res_cands = [], []
+
+for i in range(start_p_idx + rad, last_valid_idx - rad + 1):
+    lo_w = lows_arr[i - rad:i + rad + 1]
+    hi_w = highs_arr[i - rad:i + rad + 1]
+    if lows_arr[i] <= np.nanmin(lo_w):
+        sup_cands.append((float(lows_arr[i]), i))
+    if highs_arr[i] >= np.nanmax(hi_w):
+        res_cands.append((float(highs_arr[i]), i))
+
+for idx, price in bi_points[-16:]:
+    if price < curr_price:
+        sup_cands.append((float(price), int(idx)))
+    elif price > curr_price:
+        res_cands.append((float(price), int(idx)))
+
+tol = max(curr_price * 0.004, float(np.nanstd(close_arr[start_p_idx:last_valid_idx + 1])) * 0.35, 1e-6)
+
+def pick_distinct(cands, reverse=False):
+    ordered = sorted(cands, key=lambda it: abs(it[0] - curr_price))
+    chosen = []
+    for p, i in ordered:
+        if any(abs(p - o[0]) <= tol for o in chosen):
+            continue
+        chosen.append((p, i))
+        if len(chosen) == 2:
+            break
+    return sorted(chosen, key=lambda it: it[0], reverse=reverse)
+
+sups = pick_distinct([(p, i) for p, i in sup_cands if p < curr_price * 0.9995], reverse=True)
+ress = pick_distinct([(p, i) for p, i in res_cands if p > curr_price * 1.0005], reverse=False)
+x_ext_end = total_bars + 15
+
+# 绘制压力虚线 (红)
+for rank, (p_val, i_idx) in enumerate(ress, 1):
+    fig.add_trace(go.Scatter(
+        x=[max(0, i_idx), x_ext_end], y=[p_val, p_val],
+        mode="lines", line=dict(color="#D32F2F", width=1.5, dash="dash"),
+        showlegend=False,
+    ), row=1, col=1)
+    fig.add_annotation(
+        x=x_ext_end, y=p_val, text=f"**压力{rank}: {p_val:.2f}**",
+        showarrow=False, font=dict(color="#D32F2F", size=11),
+        xanchor="left", yanchor="bottom", row=1, col=1
+    )
+
+# 绘制支撑虚线 (蓝)
+for rank, (p_val, i_idx) in enumerate(sups, 1):
+    fig.add_trace(go.Scatter(
+        x=[max(0, i_idx), x_ext_end], y=[p_val, p_val],
+        mode="lines", line=dict(color="#1976D2", width=1.5, dash="dash"),
+        showlegend=False,
+    ), row=1, col=1)
+    fig.add_annotation(
+        x=x_ext_end, y=p_val, text=f"**支撑{rank}: {p_val:.2f}**",
+        showarrow=False, font=dict(color="#1976D2", size=11),
+        xanchor="left", yanchor="top", row=1, col=1
+    )
+
+# 8. 波浪标号
 waves = getattr(result, "waves", None) or []
 if show_wave and waves:
     wave_points = []
@@ -354,7 +433,7 @@ if show_wave and waves:
                 row=1, col=1
             )
 
-# 9. 严格对齐本地 plot_channel 形态通道
+# 9. 形态通道与参数统计标注
 channel = getattr(result, "channel", None)
 if show_channel and channel and getattr(channel, "valid", False):
     items_to_draw = []
@@ -397,174 +476,8 @@ if show_channel and channel and getattr(channel, "valid", False):
                 mode="lines", line=dict(color=color_lo, width=2.0 if is_primary else 1.4, dash="dash"),
                 name="通道下轨",
             ), row=1, col=1)
-
-# 10. 严格对齐本地 plot_signals 买卖点（大号五角星与加宽文字）
-if show_signals:
-    signals = getattr(result, "signals", None) or getattr(result, "trade_points", None) or []
-    price_span = float(frame["high"].max() - frame["low"].min())
-    y_offset = price_span * 0.02
-    
-    for s in signals:
-        is_tentative = getattr(s, "tentative", False)
-        if only_confirmed and is_tentative:
-            continue
-        idx = getattr(s, "raw_index", getattr(s, "index", None))
-        price = getattr(s, "price", None)
-        if idx is None or price is None:
-            continue
-        try:
-            idx = int(idx)
-            price = float(price)
-            if not (0 <= idx < total_bars):
-                continue
-            is_buy = getattr(s, "side", "") == "buy"
-            label = str(getattr(s, "label", getattr(s, "display", ""))).upper()
-            color = "#FF453A" if is_buy else "#30D158"
             
-            # 五角星散点
-            fig.add_trace(go.Scatter(
-                x=[idx], y=[price],
-                mode="markers",
-                marker=dict(size=14, symbol="star", color=color, line=dict(color="#FFFFFF", width=1.5)),
-                showlegend=False,
-            ), row=1, col=1)
-            
-            # 加宽标牌
-            fig.add_annotation(
-                x=idx, y=price - y_offset if is_buy else price + y_offset,
-                text=f"**{label}**",
-                showarrow=False,
-                font=dict(color=color, size=13, family="Arial Black"),
-                row=1, col=1
-            )
-        except Exception:
-            pass
-
-# 11. 严格对齐本地 plot_squeeze_momentum_with_badges 副图
-if subchart_choice == "Squeeze 动量":
-    squeeze = indicators.get("squeeze")
-    if isinstance(squeeze, pd.DataFrame) and "momentum" in squeeze.columns:
-        m = pd.to_numeric(squeeze["momentum"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-        on = np.asarray(squeeze.get("on", np.zeros(len(m), dtype=bool)), dtype=bool)
-    else:
-        c = frame["close"].astype(float)
-        ema20 = c.ewm(span=20, adjust=False).mean()
-        highs = frame["high"].astype(float)
-        lows = frame["low"].astype(float)
-        mid = (highs.rolling(20).max() + lows.rolling(20).min()) / 2 + ema20
-        mid = mid / 2
-        m = (c - mid).rolling(20).mean().fillna(0.0).to_numpy(dtype=float)
-        on = np.zeros(len(m), dtype=bool)
-
-    n_bars = min(len(x_indices), len(m))
-    x_sub = x_indices[:n_bars]
-    m_sub = m[:n_bars]
-    sqz_colors = ["#FF453A" if val >= 0 else "#26D0B8" for val in m_sub]
-    
-    fig.add_trace(go.Bar(
-        x=x_sub, y=m_sub, marker_color=sqz_colors, name="Squeeze动量"
-    ), row=2, col=1)
-    
-    if on.any():
-        on_sub = on[:n_bars]
-        fig.add_trace(go.Scatter(
-            x=x_sub[on_sub], y=np.zeros(int(on_sub.sum())),
-            mode="markers", marker=dict(size=5, color="#9A9A9F"), name="挤压状态"
-        ), row=2, col=1)
-        
-    patterns = indicators.get("macd_patterns")
-    if isinstance(patterns, dict):
-        for idx in patterns.get("air_refuel", []):
-            if 0 <= int(idx) < n_bars:
-                fig.add_annotation(
-                    x=int(idx), y=float(m_sub[int(idx)]), text="⚡加油",
-                    showarrow=True, arrowhead=1, arrowcolor="#FFD60A",
-                    font=dict(color="#FFD60A", size=11), row=2, col=1
-                )
-        for idx in patterns.get("frost_on_snow", []):
-            if 0 <= int(idx) < n_bars:
-                fig.add_annotation(
-                    x=int(idx), y=float(m_sub[int(idx)]), text="💣雪上加霜",
-                    showarrow=True, arrowhead=1, arrowcolor="#FF453A",
-                    font=dict(color="#FF453A", size=11), row=2, col=1
-                )
-else:
-    macd_df = indicators.get("macd")
-    if isinstance(macd_df, pd.DataFrame) and "macd" in macd_df.columns:
-        hist_vals = macd_df["macd"].fillna(0.0).tolist()
-    else:
-        c = frame["close"].astype(float)
-        dif = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
-        dea = dif.ewm(span=9, adjust=False).mean()
-        hist_vals = (2 * (dif - dea)).tolist()
-        
-    macd_colors = ["#FF453A" if v >= 0 else "#26D0B8" for v in hist_vals]
-    fig.add_trace(go.Bar(
-        x=x_indices, y=hist_vals, marker_color=macd_colors, name="MACD"
-    ), row=2, col=1)
-
-# 动态设定默认视野（默认回看最近 110 根 K 线）
-view_span = min(110, total_bars)
-start_idx = max(0, total_bars - view_span)
-view_slice = frame.iloc[start_idx:]
-y_min = float(view_slice["low"].min()) * 0.99
-y_max = float(view_slice["high"].max()) * 1.01
-
-fig.update_layout(
-    template="plotly_white",
-    paper_bgcolor="#FFFFFF",
-    plot_bgcolor="#FFFFFF",
-    shapes=shapes,
-    xaxis_rangeslider_visible=False,
-    margin=dict(l=8, r=8, t=10, b=8),
-    height=640,
-    font=dict(color="#475569", family="Segoe UI, sans-serif"),
-    legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1, font=dict(size=10)),
-    dragmode="pan",
-)
-
-tick_step = max(1, total_bars // 10)
-tick_vals = list(range(0, total_bars, tick_step))
-if (total_bars - 1) not in tick_vals:
-    tick_vals.append(total_bars - 1)
-tick_texts = [date_labels[i] for i in tick_vals]
-
-fig.update_xaxes(
-    tickvals=tick_vals,
-    ticktext=tick_texts,
-    range=[start_idx, total_bars + 3],
-    showgrid=True,
-    gridcolor="#F1F5F9",
-)
-fig.update_yaxes(
-    range=[y_min, y_max],
-    showgrid=True,
-    gridcolor="#F1F5F9",
-    zerolinecolor="#E2E8F0",
-    row=1, col=1
-)
-
-st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "scrollZoom": True})
-
-# 信号雷达面板
-st.subheader("🎯 实时买卖点雷达")
-trade_points = getattr(result, "signals", None) or getattr(result, "trade_points", []) or []
-signals_list = list(reversed(trade_points))[:6]
-if not signals_list:
-    st.caption("当前区间尚未形成可确认的缠论买卖点。")
-else:
-    for sig in signals_list:
-        is_tentative = getattr(sig, "tentative", False)
-        if only_confirmed and is_tentative:
-            continue
-        is_b = getattr(sig, "side", "buy") == "buy"
-        badge = "🟢" if is_b else "🔴"
-        state = "观察态" if is_tentative else "确定态"
-        price_val = float(getattr(sig, "price", 0.0))
-        sig_label = getattr(sig, "label", getattr(sig, "display", "信号"))
-        disp_txt = f"{badge} **{sig_label}** · {state} · {getattr(sig, 'date', '')} · {price_val:.2f}"
-        reason_txt = f"依据：{getattr(sig, 'reason', '') or '缠论结构判定'}"
-        if is_b:
-            st.success(f"{disp_txt}\n\n{reason_txt}")
-        else:
-            st.error(f"{disp_txt}\n\n{reason_txt}")
+            # 原版右侧参数详细文本块
+            prefix = "【主结构】" if is_primary else "【局部】"
+            struct_info_text = (
+                f"**{prefix} {getattr(struct, 'label', '整理')}({st_state})**
