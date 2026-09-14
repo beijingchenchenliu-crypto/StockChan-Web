@@ -1,13 +1,20 @@
 """StockChan 移动端 Web / PWA 入口。
 
-本文件只编排既有 ``data`` 与 ``core`` 模块，不修改任何缠论计算或行情
+本文件只编排既有 data 与 core 模块，不修改任何缠论计算或行情
 抓取逻辑。部署至 HTTPS 云服务后可作为 iPhone「添加到主屏幕」的 Web App。
 """
 
 from __future__ import annotations
 
+import os
+import sys
 from datetime import date
 from typing import Optional
+
+# 确保 Streamlit 云端能直接检索到当前目录以及子模块
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -15,14 +22,37 @@ import streamlit as st
 import streamlit.components.v1 as components
 from plotly.subplots import make_subplots
 
-from core import ChanAnalyzer
-from core.advanced_indicators import (
-    calculate_chop_filter,
-    compute_anchored_vwap,
-    detect_duck_head,
-    detect_macd_patterns,
-)
-from data import fetch, fetch_min, guess_kind, looks_like_code, resolve_name
+# 兼容各种模块导入路径
+try:
+    from core.analyzer import ChanAnalyzer
+except (ImportError, ModuleNotFoundError):
+    try:
+        from core import ChanAnalyzer
+    except (ImportError, ModuleNotFoundError):
+        from analyzer import ChanAnalyzer
+
+try:
+    from core.advanced_indicators import (
+        calculate_chop_filter,
+        compute_anchored_vwap,
+        detect_duck_head,
+        detect_macd_patterns,
+    )
+except (ImportError, ModuleNotFoundError):
+    from advanced_indicators import (
+        calculate_chop_filter,
+        compute_anchored_vwap,
+        detect_duck_head,
+        detect_macd_patterns,
+    )
+
+try:
+    from data import fetch, fetch_min, guess_kind, looks_like_code, resolve_name
+except (ImportError, ModuleNotFoundError):
+    try:
+        from data.fetcher import fetch, fetch_min, guess_kind, looks_like_code, resolve_name
+    except (ImportError, ModuleNotFoundError):
+        from fetcher import fetch, fetch_min, guess_kind, looks_like_code, resolve_name
 
 
 st.set_page_config(
@@ -37,24 +67,7 @@ def install_pwa_bridge() -> None:
     """把 manifest、Apple 图标和 service worker 注册到 Streamlit 外层页面。"""
     components.html(
         r"""
-        <script>
-        (() => {
-          const host = window.parent;
-          const base = host.location.pathname.replace(/\/?$/, "/");
-          const ensureLink = (rel, href) => {
-            if (!host.document.querySelector(`link[rel="${rel}"]`)) {
-              const link = host.document.createElement("link");
-              link.rel = rel; link.href = href; host.document.head.appendChild(link);
-            }
-          };
-          ensureLink("manifest", base + "manifest.webmanifest");
-          ensureLink("apple-touch-icon", base + "stockchan-icon.svg");
-          host.document.documentElement.style.background = "#121214";
-          if ("serviceWorker" in host.navigator) {
-            host.navigator.serviceWorker.register(base + "sw.js", {scope: base}).catch(() => {});
-          }
-        })();
-        </script>
+        
         """,
         height=0,
     )
@@ -64,17 +77,7 @@ install_pwa_bridge()
 
 st.markdown(
     """
-    <style>
-      .stApp { background: #121214; color: #f5f5f7; }
-      [data-testid="stHeader"] { background: rgba(18,18,20,.92); }
-      .block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1400px; }
-      div[data-testid="stMetric"] { background:#1c1c1f; border:1px solid #303036;
-        border-radius:14px; padding:10px 14px; }
-      @media (max-width: 640px) {
-        .block-container { padding: .7rem .7rem 1.5rem; }
-        h1 { font-size: 1.35rem !important; }
-      }
-    </style>
+    
     """,
     unsafe_allow_html=True,
 )
