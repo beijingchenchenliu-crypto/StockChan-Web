@@ -18,7 +18,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 from plotly.subplots import make_subplots
 
 # 1. 核心缠论模块兼容导入
@@ -61,7 +60,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# 注入浅色 PWA 桥接与优雅浅色 CSS
+# 浅色 CSS
 st.markdown(
     """
     
@@ -98,11 +97,9 @@ def calculate_indicators(frame: pd.DataFrame):
     high = frame["high"].astype(float)
     low = frame["low"].astype(float)
     
-    # 均线牛熊线 (EMA20 & EMA60)
     ema20 = close.ewm(span=20, adjust=False).mean()
     ema60 = close.ewm(span=60, adjust=False).mean()
     
-    # 肯特纳通道 (KC: 20周期 EMA +/- 1.5倍 ATR)
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
@@ -111,13 +108,11 @@ def calculate_indicators(frame: pd.DataFrame):
     kc_upper = ema20 + 1.5 * atr20
     kc_lower = ema20 - 1.5 * atr20
     
-    # 布林带挤压状态
     std20 = close.rolling(20).std()
     bb_upper = ema20 + 2.0 * std20
     bb_lower = ema20 - 2.0 * std20
     is_squeeze = (bb_lower > kc_lower) & (bb_upper < kc_upper)
     
-    # Squeeze 动量
     highest_20 = high.rolling(20).max()
     lowest_20 = low.rolling(20).min()
     mid = (highest_20 + lowest_20) / 2 + ema20
@@ -164,7 +159,6 @@ def get_analysis_data(symbol: str, kind: str, minute_period: Optional[str], star
 
 st.title("📈 StockChan · 缠论与动量几何")
 
-# 1. 顶部查询栏
 with st.form("quote_query", border=False):
     col1, col2, col3, col4 = st.columns([2.1, 1, 1, 0.8])
     with col1:
@@ -176,7 +170,6 @@ with st.form("quote_query", border=False):
     with col4:
         submitted = st.form_submit_button("加载行情", use_container_width=True)
 
-# 2. 叠加显示控制
 with st.expander("🛠️ 叠加显示与指标配置", expanded=False):
     r1_1, r1_2, r1_3, r1_4, r1_5 = st.columns(5)
     with r1_1:
@@ -213,7 +206,6 @@ except Exception as exc:
     st.error(f"行情解析失败：{type(exc).__name__}: {exc}")
     st.stop()
 
-# 计算指标
 ema20, ema60, kc_upper, kc_lower, is_squeeze, squeeze_val = calculate_indicators(df)
 
 latest_chop = chop.iloc[-1] if not chop.empty else float("nan")
@@ -223,7 +215,6 @@ metric1.metric("最新收盘", f"{float(df['close'].iloc[-1]):.2f}")
 metric2.metric("CHOP", "—" if pd.isna(latest_chop) else f"{latest_chop:.1f}")
 metric3.metric("市场状态", regime)
 
-# 日期格式化
 date_format = "%Y-%m-%d %H:%M" if minute_period else "%Y-%m-%d"
 df["date_str"] = df["date"].dt.strftime(date_format)
 
@@ -232,7 +223,7 @@ fig = make_subplots(
     row_heights=[0.74, 0.26],
 )
 
-# 1. K线图（白底浅色方案：纯正 A 股红涨绿跌）
+# 1. K线图（白底浅色方案：红涨绿跌）
 fig.add_trace(go.Candlestick(
     x=df["date_str"], open=df["open"], high=df["high"], low=df["low"], close=df["close"],
     name="K线",
@@ -240,7 +231,7 @@ fig.add_trace(go.Candlestick(
     decreasing_line_color="#0FA958", decreasing_fillcolor="#0FA958",
 ), row=1, col=1)
 
-# 2. 牛熊分界线 (白底下醒目的橙/紫线条)
+# 2. 牛熊分界线
 if show_bull_bear:
     fig.add_trace(go.Scatter(
         x=df["date_str"], y=ema20, mode="lines",
@@ -262,7 +253,7 @@ if show_kc:
         line=dict(color="rgba(14, 165, 233, 0.7)", width=1, dash="dot"), name="KC下轨"
     ), row=1, col=1)
 
-# 4. 缠论中枢矩形（浅天蓝半透明框）
+# 4. 缠论中枢矩形
 shapes = []
 if show_zs:
     zs_candidates = (
@@ -300,7 +291,7 @@ if show_zs:
             except Exception:
                 pass
 
-# 5. 缠论笔（浅底下采用深金黄 / 琥珀色，对比度极佳）
+# 5. 缠论笔（深琥珀金）
 if show_bi:
     bi_candidates = getattr(result, "bi_list", None) or getattr(result, "bis", None) or []
     bi_x, bi_y = [], []
@@ -383,7 +374,7 @@ else:
 total_len = len(df)
 view_span = min(80, total_len)
 
-# 纯净浅色专业金融画布 (Light Clean Layout)
+# 浅色金融布局
 fig.update_layout(
     template="plotly_white",
     paper_bgcolor="#ffffff",
@@ -415,7 +406,7 @@ fig.update_yaxes(
 
 st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
 
-# 信号雷达面板（浅色卡片化呈现）
+# 信号雷达面板（原生稳健渲染）
 st.subheader("🎯 实时买卖点雷达")
 trade_points = getattr(result, "trade_points", []) or []
 signals = list(reversed(trade_points))[:6]
@@ -426,10 +417,11 @@ else:
         is_b = getattr(sig, "side", "buy") == "buy"
         badge = "🟢" if is_b else "🔴"
         state = "观察态" if getattr(sig, "tentative", False) else "确定态"
+        price_val = float(getattr(sig, "price", 0.0))
+        disp_text = f"{badge} **{getattr(sig, 'display', '信号')}** · {state} · {getattr(sig, 'date', '')} · {price_val:.2f}"
+        reason_text = f"依据：{getattr(sig, 'reason', '') or '缠论结构判定'}"
         
-        box_bg = "#f0fdf4" if is_b else "#fef2f2"
-        box_border = "#bbf7d0" if is_b else "#fecaca"
-        title_color = "#15803d" if is_b else "#b91c1c"
-        
-        st.markdown(
-            f"""
+        if is_b:
+            st.success(f"{disp_text}\n\n{reason_text}")
+        else:
+            st.error(f"{disp_text}\n\n{reason_text}")
