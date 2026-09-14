@@ -2,7 +2,7 @@
 
 1:1 还原桌面版原生功能：
 - 支持分时、日线、周线、月线多周期切换
-- 完整呈现压力1/压力2（红虚线）与支撑1/支撑2（蓝虚线）
+- 完整呈现压力1/压力2与支撑1/支撑2
 - 呈现形态通道参数右侧标注【主结构】/【局部】
 - 还原中枢色块、未补跳空缺口、笔折线与 Squeeze 动量副图
 """
@@ -115,7 +115,7 @@ with c1:
 with c2:
     typed_symbol = st.text_input("代码", value="000001")
 with c3:
-    period_name = st.selectbox("周期", list(PERIOD_MAP), index=4)
+    period_name = st.selectbox("周期", list(PERIOD_MAP), index=4)  # 默认日线
 with c4:
     start_date_val = st.date_input("起始", value=date.today() - timedelta(days=500))
 with c5:
@@ -336,7 +336,13 @@ if show_bi and len(bi_points) >= 2:
         name="笔/线段",
     ), row=1, col=1)
 
-# 支撑阻力位算法
+# ===================== 防破坏 HTML 标签定义 =====================
+# 用 chr() 生成标签，防止复制或网页翻译时被 DOM 解析器吞噬破坏代码！
+HTML_B = chr(60) + "b" + chr(62)
+HTML_B_END = chr(60) + "/b" + chr(62)
+HTML_BR = chr(60) + "br" + chr(62)
+
+# ===================== 支撑阻力位算法 =====================
 close_arr = pd.to_numeric(frame["close"], errors="coerce").to_numpy(dtype=float)
 highs_arr = pd.to_numeric(frame["high"], errors="coerce").to_numpy(dtype=float)
 lows_arr = pd.to_numeric(frame["low"], errors="coerce").to_numpy(dtype=float)
@@ -387,7 +393,7 @@ for rank, (p_val, i_idx) in enumerate(ress, 1):
         showlegend=False,
     ), row=1, col=1)
     fig.add_annotation(
-        x=x_ext_end, y=p_val, text=f"**压力{rank}: {p_val:.2f}**",
+        x=x_ext_end, y=p_val, text=f"{HTML_B}压力{rank}: {p_val:.2f}{HTML_B_END}",
         showarrow=False, font=dict(color="#D32F2F", size=11),
         xanchor="left", yanchor="bottom", row=1, col=1
     )
@@ -400,7 +406,7 @@ for rank, (p_val, i_idx) in enumerate(sups, 1):
         showlegend=False,
     ), row=1, col=1)
     fig.add_annotation(
-        x=x_ext_end, y=p_val, text=f"**支撑{rank}: {p_val:.2f}**",
+        x=x_ext_end, y=p_val, text=f"{HTML_B}支撑{rank}: {p_val:.2f}{HTML_B_END}",
         showarrow=False, font=dict(color="#1976D2", size=11),
         xanchor="left", yanchor="top", row=1, col=1
     )
@@ -425,14 +431,14 @@ if show_wave and waves:
             is_top = w_kind.lower() in {"top", "高点", "peak"}
             fig.add_annotation(
                 x=w_idx, y=w_price,
-                text=f"**{w_label}**",
+                text=f"{HTML_B}{w_label}{HTML_B_END}",
                 showarrow=False,
                 font=dict(color="#8E24AA" if is_top else "#1565C0", size=13, family="Arial Black"),
                 yshift=14 if is_top else -14,
                 row=1, col=1
             )
 
-# 9. 形态通道与参数统计标注（完全消除跨行字符串隐患）
+# 9. 形态通道与参数统计标注
 channel = getattr(result, "channel", None)
 if show_channel and channel and getattr(channel, "valid", False):
     items_to_draw = []
@@ -485,8 +491,183 @@ if show_channel and channel and getattr(channel, "valid", False):
             b_up = float(getattr(struct, "breakout_up_level", 0.0))
             b_down = float(getattr(struct, "breakdown_level", 0.0))
             
-            # 单行标准模板格式化，杜绝任何换行与断开风险
-            line1 = "**%s %s(%s)**" % (prefix_str, lbl_str, st_state)
-            line2 = "触点: 上%s/下%s共%s次 | 跨度: %s根" % (u_cnt, l_cnt, tot_cnt, f_span)
-            line3 = "阻力/突破位: %.2f | 支撑位: %.2f" % (b_up, b_down)
-            struct_info_text = line1 + "
+            line1 = f"{HTML_B}{prefix_str} {lbl_str}({st_state}){HTML_B_END}"
+            line2 = f"触点: 上{u_cnt}/下{l_cnt}共{tot_cnt}次 | 跨度: {f_span}根"
+            line3 = f"阻力/突破位: {b_up:.2f} | 支撑位: {b_down:.2f}"
+            struct_info_text = f"{line1}{HTML_BR}{line2}{HTML_BR}{line3}"
+            
+            fig.add_annotation(
+                x=x_end, y=y_u_end, text=struct_info_text,
+                showarrow=False, font=dict(color=color_up, size=10),
+                xanchor="left", yanchor="bottom" if is_primary else "top",
+                align="left", row=1, col=1
+            )
+
+# 10. 买卖点大号五角星
+if show_signals:
+    signals = getattr(result, "signals", None) or getattr(result, "trade_points", None) or []
+    price_span = float(frame["high"].max() - frame["low"].min())
+    y_offset = price_span * 0.02
+    
+    for s in signals:
+        is_tentative = getattr(s, "tentative", False)
+        if only_confirmed and is_tentative:
+            continue
+        idx = getattr(s, "raw_index", getattr(s, "index", None))
+        price = getattr(s, "price", None)
+        if idx is None or price is None:
+            continue
+        try:
+            idx = int(idx)
+            price = float(price)
+            if not (0 <= idx < total_bars):
+                continue
+            is_buy = getattr(s, "side", "") == "buy"
+            label = str(getattr(s, "label", getattr(s, "display", ""))).upper()
+            color = "#FF453A" if is_buy else "#30D158"
+            
+            fig.add_trace(go.Scatter(
+                x=[idx], y=[price],
+                mode="markers",
+                marker=dict(size=14, symbol="star", color=color, line=dict(color="#FFFFFF", width=1.5)),
+                showlegend=False,
+            ), row=1, col=1)
+            
+            fig.add_annotation(
+                x=idx, y=price - y_offset if is_buy else price + y_offset,
+                text=f"{HTML_B}{label}{HTML_B_END}",
+                showarrow=False,
+                font=dict(color=color, size=13, family="Arial Black"),
+                row=1, col=1
+            )
+        except Exception:
+            pass
+
+# 11. Squeeze / MACD 副图
+if subchart_choice == "Squeeze 动量":
+    squeeze = indicators.get("squeeze")
+    if isinstance(squeeze, pd.DataFrame) and "momentum" in squeeze.columns:
+        m = pd.to_numeric(squeeze["momentum"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        on = np.asarray(squeeze.get("on", np.zeros(len(m), dtype=bool)), dtype=bool)
+    else:
+        c = frame["close"].astype(float)
+        ema20 = c.ewm(span=20, adjust=False).mean()
+        highs = frame["high"].astype(float)
+        lows = frame["low"].astype(float)
+        mid = (highs.rolling(20).max() + lows.rolling(20).min()) / 2 + ema20
+        mid = mid / 2
+        m = (c - mid).rolling(20).mean().fillna(0.0).to_numpy(dtype=float)
+        on = np.zeros(len(m), dtype=bool)
+
+    n_bars = min(len(x_indices), len(m))
+    x_sub = x_indices[:n_bars]
+    m_sub = m[:n_bars]
+    sqz_colors = ["#FF453A" if val >= 0 else "#26D0B8" for val in m_sub]
+    
+    fig.add_trace(go.Bar(
+        x=x_sub, y=m_sub, marker_color=sqz_colors, name="Squeeze动量"
+    ), row=2, col=1)
+    
+    if on.any():
+        on_sub = on[:n_bars]
+        fig.add_trace(go.Scatter(
+            x=x_sub[on_sub], y=np.zeros(int(on_sub.sum())),
+            mode="markers", marker=dict(size=5, color="#9A9A9F"), name="挤压状态"
+        ), row=2, col=1)
+        
+    patterns = indicators.get("macd_patterns")
+    if isinstance(patterns, dict):
+        for idx in patterns.get("air_refuel", []):
+            if 0 <= int(idx) < n_bars:
+                fig.add_annotation(
+                    x=int(idx), y=float(m_sub[int(idx)]), text="⚡加油",
+                    showarrow=True, arrowhead=1, arrowcolor="#FFD60A",
+                    font=dict(color="#FFD60A", size=11), row=2, col=1
+                )
+        for idx in patterns.get("frost_on_snow", []):
+            if 0 <= int(idx) < n_bars:
+                fig.add_annotation(
+                    x=int(idx), y=float(m_sub[int(idx)]), text="💣雪上加霜",
+                    showarrow=True, arrowhead=1, arrowcolor="#FF453A",
+                    font=dict(color="#FF453A", size=11), row=2, col=1
+                )
+else:
+    macd_df = indicators.get("macd")
+    if isinstance(macd_df, pd.DataFrame) and "macd" in macd_df.columns:
+        hist_vals = macd_df["macd"].fillna(0.0).tolist()
+    else:
+        c = frame["close"].astype(float)
+        dif = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
+        dea = dif.ewm(span=9, adjust=False).mean()
+        hist_vals = (2 * (dif - dea)).tolist()
+        
+    macd_colors = ["#FF453A" if v >= 0 else "#26D0B8" for v in hist_vals]
+    fig.add_trace(go.Bar(
+        x=x_indices, y=hist_vals, marker_color=macd_colors, name="MACD"
+    ), row=2, col=1)
+
+# 动态视野设置
+view_span = min(110, total_bars)
+start_idx = max(0, total_bars - view_span)
+view_slice = frame.iloc[start_idx:]
+y_min = float(view_slice["low"].min()) * 0.99
+y_max = float(view_slice["high"].max()) * 1.01
+
+fig.update_layout(
+    template="plotly_white",
+    paper_bgcolor="#FFFFFF",
+    plot_bgcolor="#FFFFFF",
+    shapes=shapes,
+    xaxis_rangeslider_visible=False,
+    margin=dict(l=8, r=8, t=10, b=8),
+    height=660,
+    font=dict(color="#475569", family="Segoe UI, sans-serif"),
+    legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1, font=dict(size=10)),
+    dragmode="pan",
+)
+
+tick_step = max(1, total_bars // 10)
+tick_vals = list(range(0, total_bars, tick_step))
+if (total_bars - 1) not in tick_vals:
+    tick_vals.append(total_bars - 1)
+tick_texts = [date_labels[i] for i in tick_vals]
+
+fig.update_xaxes(
+    tickvals=tick_vals,
+    ticktext=tick_texts,
+    range=[start_idx, total_bars + 18],
+    showgrid=True,
+    gridcolor="#F1F5F9",
+)
+fig.update_yaxes(
+    range=[y_min, y_max],
+    showgrid=True,
+    gridcolor="#F1F5F9",
+    zerolinecolor="#E2E8F0",
+    row=1, col=1
+)
+
+st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "scrollZoom": True})
+
+# 信号雷达面板
+st.subheader("🎯 实时买卖点雷达")
+trade_points = getattr(result, "signals", None) or getattr(result, "trade_points", []) or []
+signals_list = list(reversed(trade_points))[:6]
+if not signals_list:
+    st.caption("当前区间尚未形成可确认的缠论买卖点。")
+else:
+    for sig in signals_list:
+        is_tentative = getattr(sig, "tentative", False)
+        if only_confirmed and is_tentative:
+            continue
+        is_b = getattr(sig, "side", "buy") == "buy"
+        badge = "🟢" if is_b else "🔴"
+        state = "观察态" if is_tentative else "确定态"
+        price_val = float(getattr(sig, "price", 0.0))
+        sig_label = getattr(sig, "label", getattr(sig, "display", "信号"))
+        disp_txt = f"{badge} **{sig_label}** · {state} · {getattr(sig, 'date', '')} · {price_val:.2f}"
+        reason_txt = f"依据：{getattr(sig, 'reason', '') or '缠论结构判定'}"
+        if is_b:
+            st.success(f"{disp_txt}\n\n{reason_txt}")
+        else:
+            st.error(f"{disp_txt}\n\n{reason_txt}")
