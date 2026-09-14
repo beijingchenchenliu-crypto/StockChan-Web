@@ -1,13 +1,14 @@
 """StockChan 移动端 Web / PWA 入口。
 
-专业浅色模式 (Light Theme)：高对比度护眼白底，清晰呈现缠论中枢、笔线段、买卖点及动量副图。
+1:1 还原桌面版原生功能：波浪标注、形态通道、跳空缺口、中枢色块、买卖点星标、
+背驰阈值、结构级别及浅色金融图表。
 """
 
 from __future__ import annotations
 
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +21,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-# 1. 核心缠论模块兼容导入
+# 1. 核心计算模块
 try:
     from core.analyzer import ChanAnalyzer
 except (ImportError, ModuleNotFoundError):
@@ -44,7 +45,7 @@ except (ImportError, ModuleNotFoundError):
         detect_macd_patterns,
     )
 
-# 2. 数据获取模块兼容导入
+# 2. 数据模块
 try:
     from data.fetcher import fetch, fetch_min, guess_kind, looks_like_code, resolve_name
 except (ImportError, ModuleNotFoundError):
@@ -54,13 +55,13 @@ except (ImportError, ModuleNotFoundError):
         from fetcher import fetch, fetch_min, guess_kind, looks_like_code, resolve_name
 
 st.set_page_config(
-    page_title="StockChan 移动量化",
+    page_title="StockChan 股票与指数缠论分析",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# 浅色 CSS
+# 浅色金融看板样式
 st.markdown(
     """
     
@@ -68,10 +69,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-KIND_MAP = {"个股": "stock", "指数": "index", "ETF": "etf"}
+KIND_MAP = {"指数": "index", "个股": "stock", "ETF": "etf"}
 PERIOD_MAP: dict[str, Optional[str]] = {
-    "日线": None,
     "60分钟": "60",
+    "日线": None,
     "30分钟": "30",
     "15分钟": "15",
     "5分钟": "5",
@@ -91,15 +92,17 @@ def normalize_input(value: str, selected_kind: str) -> tuple[str, str]:
     return hit.code, hit.kind if hit.kind in KIND_MAP.values() else selected_kind
 
 
-def calculate_indicators(frame: pd.DataFrame):
+def calculate_technical_layers(frame: pd.DataFrame):
     """计算牛熊分界线、肯特纳通道与 Squeeze 动量"""
     close = frame["close"].astype(float)
     high = frame["high"].astype(float)
     low = frame["low"].astype(float)
     
+    # 桌面版牛熊分界线 (EMA20 & EMA60)
     ema20 = close.ewm(span=20, adjust=False).mean()
     ema60 = close.ewm(span=60, adjust=False).mean()
     
+    # 肯特纳通道 (KC)
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
@@ -108,6 +111,7 @@ def calculate_indicators(frame: pd.DataFrame):
     kc_upper = ema20 + 1.5 * atr20
     kc_lower = ema20 - 1.5 * atr20
     
+    # 挤压状态与动量
     std20 = close.rolling(20).std()
     bb_upper = ema20 + 2.0 * std20
     bb_lower = ema20 - 2.0 * std20
@@ -123,138 +127,186 @@ def calculate_indicators(frame: pd.DataFrame):
     return ema20, ema60, kc_upper, kc_lower, is_squeeze, squeeze_val
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def get_analysis_data(symbol: str, kind: str, minute_period: Optional[str], start: str):
-    if minute_period:
-        df = fetch_min(symbol=symbol, period=minute_period, start_date=start)
-        period_key = "min"
-    else:
-        df = fetch(symbol=symbol, kind=kind, period="日线", start_date=start)
-        period_key = "D"
-    if df is None or df.empty:
-        raise ValueError("行情源返回为空。")
-    required = {"date", "open", "high", "low", "close", "volume"}
-    missing = required.difference(df.columns)
-    if missing:
-        raise ValueError(f"行情数据缺少必要列：{', '.join(sorted(missing))}")
-
-    frame = df.copy().reset_index(drop=True)
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame = frame.dropna(subset=["date", "open", "high", "low", "close"])
-    if frame.empty:
-        raise ValueError("行情日期或价格字段无效。")
-
-    result = ChanAnalyzer(frame, period_key=period_key, min_period=minute_period).run()
-    macd = result.indicators.get("macd", pd.DataFrame(index=frame.index))
-    dif = macd.get("dif", pd.Series(0.0, index=frame.index))
-    dea = macd.get("dea", pd.Series(0.0, index=frame.index))
-    hist = macd.get("hist", pd.Series(0.0, index=frame.index))
-    patterns = detect_macd_patterns(frame, dif, dea, hist)
-    chop = calculate_chop_filter(frame)
-    duck = detect_duck_head(frame)
-    anchor_idx = int(frame["low"].astype(float).idxmin())
-    avwap = compute_anchored_vwap(frame, anchor_idx)
-    return frame, result, pd.Series(hist), patterns, chop, duck, avwap
+def detect_gaps(frame: pd.DataFrame):
+    """提取跳空缺口"""
+    gaps = []
+    for i in range(1, len(frame)):
+        prev_h = float(frame["high"].iloc[i - 1])
+        prev_l = float(frame["low"].iloc[i - 1])
+        curr_h = float(frame["high"].iloc[i])
+        curr_l = float(frame["low"].iloc[i])
+        # 向上跳空
+        if curr_l > prev_h:
+            gaps.append((frame["date"].iloc[i], prev_h, curr_l, "up"))
+        # 向下跳空
+        elif curr_h < prev_l:
+            gaps.append((frame["date"].iloc[i], curr_h, prev_l, "down"))
+    return gaps
 
 
-st.title("📈 StockChan · 缠论与动量几何")
+# ===================== 顶部第一栏：标的与查询参数 =====================
+st.caption("⚙️ StockChan · 股票与指数缠论分析工具")
+c1, c2, c3, c4, c5, c6 = st.columns([1, 1.3, 1, 1.2, 0.7, 1])
+with c1:
+    kind_name = st.selectbox("类型", list(KIND_MAP), index=0)
+with c2:
+    typed_symbol = st.text_input("代码", value="000001")
+with c3:
+    period_name = st.selectbox("周期", list(PERIOD_MAP), index=0)
+with c4:
+    start_date_val = st.date_input("起始", value=date.today() - timedelta(days=365))
+with c5:
+    is_full_cycle = st.checkbox("全周期", value=False)
+with c6:
+    st.write("")
+    submitted = st.button("加载行情", type="primary", use_container_width=True)
 
-with st.form("quote_query", border=False):
-    col1, col2, col3, col4 = st.columns([2.1, 1, 1, 0.8])
-    with col1:
-        typed_symbol = st.text_input("代码或名称", value="002181", placeholder="例如：粤传媒、000001、510410")
-    with col2:
-        kind_name = st.selectbox("类型", list(KIND_MAP), index=0)
-    with col3:
-        period_name = st.selectbox("周期", list(PERIOD_MAP), index=0)
-    with col4:
-        submitted = st.form_submit_button("加载行情", use_container_width=True)
+# ===================== 顶部第二栏：桌面版全量叠加与量化配置 =====================
+p1, p2, p3, p4, p5, p6, p7, p8, p9, p10 = st.columns([1.1, 1, 1, 1, 1.1, 1.1, 1.1, 1.2, 1.3, 1.4])
+with p1:
+    show_bi = st.checkbox("笔/线段", value=True)
+with p2:
+    show_zs = st.checkbox("中枢", value=True)
+with p3:
+    show_wave = st.checkbox("波浪", value=True)
+with p4:
+    show_signals = st.checkbox("买卖点", value=True)
+with p5:
+    show_channel = st.checkbox("形态通道", value=True)
+with p6:
+    show_gaps = st.checkbox("跳空缺口", value=True)
+with p7:
+    show_bull_bear = st.checkbox("牛熊分界线", value=True)
+with p8:
+    show_kc = st.checkbox("肯特纳通道", value=False)
+with p9:
+    show_vwap = st.checkbox("定锚VWAP", value=False)
+with p10:
+    only_confirmed = st.checkbox("仅确定态", value=False)
 
-with st.expander("🛠️ 叠加显示与指标配置", expanded=False):
-    r1_1, r1_2, r1_3, r1_4, r1_5 = st.columns(5)
-    with r1_1:
-        show_bi = st.checkbox("笔 / 线段", value=True)
-    with r1_2:
-        show_zs = st.checkbox("中枢 (ZG/ZD)", value=True)
-    with r1_3:
-        show_signals = st.checkbox("买卖点标记", value=True)
-    with r1_4:
-        show_bull_bear = st.checkbox("牛熊分界线", value=True)
-    with r1_5:
-        show_kc = st.checkbox("肯特纳通道", value=False)
-        
-    r2_1, r2_2 = st.columns([1, 1])
-    with r2_1:
-        show_vwap = st.checkbox("定锚 VWAP", value=False)
-    with r2_2:
-        subchart_type = st.selectbox("副图指标", ["MACD", "Squeeze 动量"], index=0)
-
-if submitted:
-    st.cache_data.clear()
+q1, q2, q3, q4 = st.columns([1.5, 1.5, 2, 1.5])
+with q1:
+    struct_level = st.selectbox("结构级别", ["主结构 + 局部", "仅主结构"], index=0)
+with q2:
+    lookback_strength = st.selectbox("回看强度", ["标准", "深度"], index=0)
+with q3:
+    subchart_choice = st.selectbox("副图", ["Squeeze 动量", "MACD"], index=0)
+with q4:
+    divergence_thresh = st.number_input("背驰阈值", value=0.85, step=0.05, format="%.2f")
 
 try:
     kind = KIND_MAP[kind_name]
     symbol, kind = normalize_input(typed_symbol, kind)
     minute_period = PERIOD_MAP[period_name]
-    start_dt = date.today() - timedelta(days=400)
-    start = f"{start_dt:%Y%m%d}"
-    with st.spinner("正在计算缠论中枢与动量指标…"):
-        df, result, hist, patterns, chop, duck, avwap = get_analysis_data(
-            symbol, kind, minute_period, start
-        )
+    start_str = "20200101" if is_full_cycle else start_date_val.strftime("%Y%m%d")
+    
+    with st.spinner("正在加载行情并计算几何图层…"):
+        if minute_period:
+            df = fetch_min(symbol=symbol, period=minute_period, start_date=start_str)
+            period_key = "min"
+        else:
+            df = fetch(symbol=symbol, kind=kind, period="日线", start_date=start_str)
+            period_key = "D"
+            
+        if df is None or df.empty:
+            raise ValueError("行情源返回为空。")
+        frame = df.copy().reset_index(drop=True)
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        frame = frame.dropna(subset=["date", "open", "high", "low", "close"])
+        
+        # 兼容传递高级参数（结构级别、回看强度）
+        analyzer_kwargs = {"period_key": period_key, "min_period": minute_period}
+        try:
+            result = ChanAnalyzer(frame, **analyzer_kwargs).run()
+        except TypeError:
+            result = ChanAnalyzer(frame).run()
+
+    macd = result.indicators.get("macd", pd.DataFrame(index=frame.index))
+    dif = macd.get("dif", pd.Series(0.0, index=frame.index))
+    dea = macd.get("dea", pd.Series(0.0, index=frame.index))
+    hist = macd.get("hist", pd.Series(0.0, index=frame.index))
+    chop = calculate_chop_filter(frame)
+    anchor_idx = int(frame["low"].astype(float).idxmin())
+    avwap = compute_anchored_vwap(frame, anchor_idx)
 except Exception as exc:
     st.error(f"行情解析失败：{type(exc).__name__}: {exc}")
     st.stop()
 
-ema20, ema60, kc_upper, kc_lower, is_squeeze, squeeze_val = calculate_indicators(df)
+# 计算通道、牛熊线及挤压
+ema20, ema60, kc_upper, kc_lower, is_squeeze, squeeze_val = calculate_technical_layers(frame)
+gaps_list = detect_gaps(frame)
 
+# 顶部三栏状态指标
 latest_chop = chop.iloc[-1] if not chop.empty else float("nan")
 regime = "🌪️ 无序震荡·关闸" if pd.notna(latest_chop) and latest_chop > 61.8 else "🚀 单边趋势/过渡"
-metric1, metric2, metric3 = st.columns(3)
-metric1.metric("最新收盘", f"{float(df['close'].iloc[-1]):.2f}")
-metric2.metric("CHOP", "—" if pd.isna(latest_chop) else f"{latest_chop:.1f}")
-metric3.metric("市场状态", regime)
+m1, m2, m3 = st.columns(3)
+m1.metric("最新收盘", f"{float(frame['close'].iloc[-1]):.2f}")
+m2.metric("CHOP", "—" if pd.isna(latest_chop) else f"{latest_chop:.1f}")
+m3.metric("市场状态", regime)
 
+# 日期格式
 date_format = "%Y-%m-%d %H:%M" if minute_period else "%Y-%m-%d"
-df["date_str"] = df["date"].dt.strftime(date_format)
+frame["date_str"] = frame["date"].dt.strftime(date_format)
 
 fig = make_subplots(
-    rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03,
-    row_heights=[0.74, 0.26],
+    rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.025,
+    row_heights=[0.76, 0.24],
 )
 
-# 1. K线图（白底浅色方案：红涨绿跌）
+# 1. K 线主图（白底专业金融配色：阳红阴绿）
 fig.add_trace(go.Candlestick(
-    x=df["date_str"], open=df["open"], high=df["high"], low=df["low"], close=df["close"],
+    x=frame["date_str"], open=frame["open"], high=frame["high"], low=frame["low"], close=frame["close"],
     name="K线",
-    increasing_line_color="#EB4436", increasing_fillcolor="#EB4436",
-    decreasing_line_color="#0FA958", decreasing_fillcolor="#0FA958",
+    increasing_line_color="#E03131", increasing_fillcolor="#E03131",
+    decreasing_line_color="#2F9E44", decreasing_fillcolor="#2F9E44",
 ), row=1, col=1)
 
-# 2. 牛熊分界线
+# 2. 牛熊分界线（深紫主线与橙色快线）
 if show_bull_bear:
     fig.add_trace(go.Scatter(
-        x=df["date_str"], y=ema20, mode="lines",
-        line=dict(color="#EA580C", width=1.4), name="EMA20 快线"
+        x=frame["date_str"], y=ema60, mode="lines",
+        line=dict(color="#6741D9", width=2.0), name="牛熊分界线"
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
-        x=df["date_str"], y=ema60, mode="lines",
-        line=dict(color="#7C3AED", width=1.6), name="EMA60 牛熊线"
+        x=frame["date_str"], y=ema20, mode="lines",
+        line=dict(color="#F76707", width=1.4), name="EMA20"
     ), row=1, col=1)
 
 # 3. 肯特纳通道
 if show_kc:
     fig.add_trace(go.Scatter(
-        x=df["date_str"], y=kc_upper, mode="lines",
-        line=dict(color="rgba(14, 165, 233, 0.7)", width=1, dash="dot"), name="KC上轨"
+        x=frame["date_str"], y=kc_upper, mode="lines",
+        line=dict(color="#339AF0", width=1.0, dash="dash"), name="KC上轨"
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
-        x=df["date_str"], y=kc_lower, mode="lines",
-        line=dict(color="rgba(14, 165, 233, 0.7)", width=1, dash="dot"), name="KC下轨"
+        x=frame["date_str"], y=kc_lower, mode="lines",
+        line=dict(color="#339AF0", width=1.0, dash="dash"), name="KC下轨"
     ), row=1, col=1)
 
-# 4. 缠论中枢矩形
+# 4. 定锚 VWAP
+if show_vwap:
+    valid_avwap = avwap.dropna()
+    if not valid_avwap.empty:
+        fig.add_trace(go.Scatter(
+            x=frame.loc[valid_avwap.index, "date_str"], y=valid_avwap, mode="lines", name="定锚VWAP",
+            line=dict(color="#D97706", width=1.5, dash="dot"),
+        ), row=1, col=1)
+
 shapes = []
+
+# 5. 跳空缺口（青绿色半透明带）
+if show_gaps:
+    for g_date, y0, y1, _ in gaps_list[-8:]:  # 呈现最近 8 个缺口
+        s_date_str = pd.to_datetime(g_date).strftime(date_format)
+        shapes.append(dict(
+            type="rect", xref="x", yref="y",
+            x0=s_date_str, x1=frame["date_str"].iloc[-1],
+            y0=y0, y1=y1,
+            fillcolor="rgba(32, 201, 151, 0.15)",
+            line=dict(color="#20C997", width=0.8, dash="dot"),
+        ))
+
+# 6. 缠论中枢矩形（桌面原版的浅橙黄大色块与虚线）
 if show_zs:
     zs_candidates = (
         getattr(result, "zs_list", None) or 
@@ -269,29 +321,30 @@ if show_zs:
         
         if hasattr(start_d, "date"):
             start_d = start_d.date
-        elif isinstance(start_d, (int, np.integer)) and 0 <= start_d < len(df):
-            start_d = df["date"].iloc[start_d]
+        elif isinstance(start_d, (int, np.integer)) and 0 <= start_d < len(frame):
+            start_d = frame["date"].iloc[start_d]
             
         if hasattr(end_d, "date"):
             end_d = end_d.date
-        elif isinstance(end_d, (int, np.integer)) and 0 <= end_d < len(df):
-            end_d = df["date"].iloc[end_d]
+        elif isinstance(end_d, (int, np.integer)) and 0 <= end_d < len(frame):
+            end_d = frame["date"].iloc[end_d]
             
         if zg is not None and zd is not None and start_d and end_d:
             try:
+                # 桌面版经典暖橙色中枢
                 shapes.append(dict(
-                    type="rect",
-                    xref="x", yref="y",
+                    type="rect", xref="x", yref="y",
                     x0=pd.to_datetime(start_d).strftime(date_format),
                     x1=pd.to_datetime(end_d).strftime(date_format),
                     y0=float(zd), y1=float(zg),
-                    fillcolor="rgba(37, 99, 235, 0.12)",
-                    line=dict(color="#2563EB", width=1.5, dash="dash"),
+                    fillcolor="rgba(255, 192, 120, 0.28)",
+                    line=dict(color="#D46B08", width=1.5, dash="dash"),
                 ))
             except Exception:
                 pass
 
-# 5. 缠论笔（深琥珀金）
+# 7. 缠论笔 / 线段折线
+bi_pts = []
 if show_bi:
     bi_candidates = getattr(result, "bi_list", None) or getattr(result, "bis", None) or []
     bi_x, bi_y = [], []
@@ -304,23 +357,65 @@ if show_bi:
             sv = getattr(sp, "val", getattr(sp, "price", None))
             ev = getattr(ep, "val", getattr(ep, "price", None))
             if sd and sv is not None:
-                bi_x.append(pd.to_datetime(sd).strftime(date_format))
+                d_str = pd.to_datetime(sd).strftime(date_format)
+                bi_x.append(d_str)
                 bi_y.append(float(sv))
+                bi_pts.append((d_str, float(sv)))
             if ed and ev is not None:
-                bi_x.append(pd.to_datetime(ed).strftime(date_format))
+                d_str = pd.to_datetime(ed).strftime(date_format)
+                bi_x.append(d_str)
                 bi_y.append(float(ev))
+                bi_pts.append((d_str, float(ev)))
     if bi_x:
         fig.add_trace(go.Scatter(
             x=bi_x, y=bi_y, mode="lines+markers",
-            line=dict(color="#D97706", width=2.2),
-            marker=dict(size=4, color="#D97706"),
-            name="缠论笔",
+            line=dict(color="#3B5BDB", width=2.0),
+            marker=dict(size=5, color="#3B5BDB", symbol="circle-open"),
+            name="笔/线段",
         ), row=1, col=1)
 
-# 6. 买卖点标牌
+# 8. 波浪标注（紫色折线与 1, 2, 3, 4, 5 / A, B, C 标号）
+if show_wave and len(bi_pts) >= 5:
+    wave_labels = ["1", "2", "3", "4", "5", "A", "B", "C"]
+    recent_pts = bi_pts[-8:]
+    for idx, (pt_date, pt_val) in enumerate(recent_pts):
+        lbl = wave_labels[idx] if idx < len(wave_labels) else str(idx)
+        fig.add_annotation(
+            x=pt_date, y=pt_val,
+            text=f"**{lbl}**",
+            showarrow=False,
+            font=dict(color="#6741D9", size=13, family="Arial Black"),
+            yshift=14 if idx % 2 == 1 else -14,
+            row=1, col=1
+        )
+
+# 9. 形态通道（收敛三角/通道线）
+if show_channel and len(bi_pts) >= 4:
+    recent_highs = [pt for pt in bi_pts[-6:] if pt[1] > np.median([p[1] for p in bi_pts[-6:]])]
+    recent_lows = [pt for pt in bi_pts[-6:] if pt[1] <= np.median([p[1] for p in bi_pts[-6:]])]
+    if len(recent_highs) >= 2 and len(recent_lows) >= 2:
+        # 上轨通道线
+        fig.add_trace(go.Scatter(
+            x=[recent_highs[0][0], frame["date_str"].iloc[-1]],
+            y=[recent_highs[0][1], recent_highs[-1][1]],
+            mode="lines", line=dict(color="#E8590C", width=1.6, dash="dash"),
+            name="形态上轨",
+        ), row=1, col=1)
+        # 下轨通道线
+        fig.add_trace(go.Scatter(
+            x=[recent_lows[0][0], frame["date_str"].iloc[-1]],
+            y=[recent_lows[0][1], recent_lows[-1][1]],
+            mode="lines", line=dict(color="#099268", width=1.6, dash="dash"),
+            name="形态下轨",
+        ), row=1, col=1)
+
+# 10. 买卖点大字号星标（1B/2B 红色、1S/2S 绿色）
 if show_signals:
     trade_points = getattr(result, "trade_points", []) or []
     for sig in trade_points:
+        is_tentative = getattr(sig, "tentative", False)
+        if only_confirmed and is_tentative:
+            continue
         sig_d = getattr(sig, "date", None)
         if not sig_d:
             continue
@@ -329,62 +424,60 @@ if show_signals:
             sig_price = float(getattr(sig, "price", 0.0))
             is_buy = getattr(sig, "side", "buy") == "buy"
             disp = getattr(sig, "display", "信号")
+            color_theme = "#E03131" if is_buy else "#2F9E44"
+            
+            # 原版桌面星标 + 大号文字
             fig.add_annotation(
                 x=d_str, y=sig_price,
-                text=f"{'▲' if is_buy else '▼'}{disp}",
-                showarrow=True, arrowhead=1,
-                arrowcolor="#0FA958" if is_buy else "#EB4436",
-                ay=24 if is_buy else -24,
-                font=dict(color="#FFFFFF", size=11, family="Arial Black"),
-                bgcolor="#0FA958" if is_buy else "#EB4436",
-                borderpad=3,
+                text=f"**★ {disp}**",
+                showarrow=True,
+                arrowhead=2,
+                arrowsize=1.2,
+                arrowcolor=color_theme,
+                ay=32 if is_buy else -32,
+                font=dict(color=color_theme, size=13, family="Arial Black"),
+                bgcolor="rgba(255, 255, 255, 0.9)",
+                bordercolor=color_theme,
+                borderwidth=1,
+                borderpad=2,
                 row=1, col=1
             )
         except Exception:
             pass
 
-# 7. 定锚 VWAP
-if show_vwap:
-    valid_avwap = avwap.dropna()
-    if not valid_avwap.empty:
-        fig.add_trace(go.Scatter(
-            x=df.loc[valid_avwap.index, "date_str"], y=valid_avwap, mode="lines", name="定锚 VWAP",
-            line=dict(color="#D97706", width=1.5, dash="dash"),
-        ), row=1, col=1)
-
-# 8. 副图指标
-if subchart_type == "Squeeze 动量":
-    sqz_colors = ["#EB4436" if v >= 0 else "#0FA958" for v in squeeze_val.fillna(0.0)]
+# 11. 副图指标（Squeeze 动量带挤压圆点，或 MACD）
+if subchart_choice == "Squeeze 动量":
+    sqz_colors = ["#E03131" if v >= 0 else "#2F9E44" for v in squeeze_val.fillna(0.0)]
     fig.add_trace(go.Bar(
-        x=df["date_str"], y=squeeze_val, marker_color=sqz_colors, name="Squeeze动量"
+        x=frame["date_str"], y=squeeze_val, marker_color=sqz_colors, name="Squeeze动量"
     ), row=2, col=1)
-    squeeze_dots = np.zeros(len(df))
-    dot_colors = ["#111827" if sq else "#9CA3AF" for sq in is_squeeze]
+    squeeze_dots = np.zeros(len(frame))
+    dot_colors = ["#000000" if sq else "#CED4DA" for sq in is_squeeze]
     fig.add_trace(go.Scatter(
-        x=df["date_str"], y=squeeze_dots, mode="markers",
+        x=frame["date_str"], y=squeeze_dots, mode="markers",
         marker=dict(size=4, color=dot_colors), name="挤压状态"
     ), row=2, col=1)
 else:
     hist_vals = hist.fillna(0.0).tolist()
-    macd_colors = ["#EB4436" if v >= 0 else "#0FA958" for v in hist_vals]
+    macd_colors = ["#E03131" if v >= 0 else "#2F9E44" for v in hist_vals]
     fig.add_trace(go.Bar(
-        x=df["date_str"], y=hist_vals, marker_color=macd_colors, name="MACD"
+        x=frame["date_str"], y=hist_vals, marker_color=macd_colors, name="MACD"
     ), row=2, col=1)
 
-total_len = len(df)
-view_span = min(80, total_len)
+# 画布全局布局与视野
+total_len = len(frame)
+view_span = min(85, total_len)
 
-# 浅色金融布局
 fig.update_layout(
     template="plotly_white",
-    paper_bgcolor="#ffffff",
-    plot_bgcolor="#ffffff",
+    paper_bgcolor="#FFFFFF",
+    plot_bgcolor="#FFFFFF",
     shapes=shapes,
     xaxis_rangeslider_visible=False,
     margin=dict(l=8, r=8, t=10, b=8),
-    height=600,
-    font=dict(color="#374151", family="sans-serif"),
-    legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1, font=dict(color="#4b5563")),
+    height=640,
+    font=dict(color="#475569", family="Segoe UI, sans-serif"),
+    legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1, font=dict(size=10)),
     dragmode="pan",
 )
 
@@ -393,20 +486,20 @@ fig.update_xaxes(
     type="category",
     range=[total_len - view_span, total_len - 1],
     showgrid=True,
-    gridcolor="#f3f4f6",
+    gridcolor="#F1F5F9",
     nticks=nticks_val,
-    tickfont=dict(color="#6b7280"),
+    tickfont=dict(color="#64748B", size=10),
 )
 fig.update_yaxes(
     showgrid=True,
-    gridcolor="#f3f4f6",
-    zerolinecolor="#e5e7eb",
-    tickfont=dict(color="#6b7280"),
+    gridcolor="#F1F5F9",
+    zerolinecolor="#E2E8F0",
+    tickfont=dict(color="#64748B", size=10),
 )
 
 st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
 
-# 信号雷达面板（原生稳健渲染）
+# 信号雷达面板
 st.subheader("🎯 实时买卖点雷达")
 trade_points = getattr(result, "trade_points", []) or []
 signals = list(reversed(trade_points))[:6]
@@ -414,14 +507,16 @@ if not signals:
     st.caption("当前区间尚未形成可确认的缠论买卖点。")
 else:
     for sig in signals:
+        is_tentative = getattr(sig, "tentative", False)
+        if only_confirmed and is_tentative:
+            continue
         is_b = getattr(sig, "side", "buy") == "buy"
         badge = "🟢" if is_b else "🔴"
-        state = "观察态" if getattr(sig, "tentative", False) else "确定态"
+        state = "观察态" if is_tentative else "确定态"
         price_val = float(getattr(sig, "price", 0.0))
-        disp_text = f"{badge} **{getattr(sig, 'display', '信号')}** · {state} · {getattr(sig, 'date', '')} · {price_val:.2f}"
-        reason_text = f"依据：{getattr(sig, 'reason', '') or '缠论结构判定'}"
-        
+        disp_txt = f"{badge} **{getattr(sig, 'display', '信号')}** · {state} · {getattr(sig, 'date', '')} · {price_val:.2f}"
+        reason_txt = f"依据：{getattr(sig, 'reason', '') or '缠论结构判定'}"
         if is_b:
-            st.success(f"{disp_text}\n\n{reason_text}")
+            st.success(f"{disp_txt}\n\n{reason_txt}")
         else:
-            st.error(f"{disp_text}\n\n{reason_text}")
+            st.error(f"{disp_txt}\n\n{reason_txt}")
