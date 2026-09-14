@@ -1,8 +1,8 @@
-"""StockChan 移动端 Web / PWA 看板（移动端性能极速优化版）。
+"""StockChan 移动端 Web / PWA 看板（移动端极致优化 + 防拷贝截断版）。
 
 1:1 还原桌面版原生功能，同时针对 iOS Safari 严重卡顿发热问题进行底层优化：
-- 渲染层截断：底层进行全周期严谨计算，但前端强制仅渲染最近 180 根可见数据，DOM节点锐减 80%
-- 触控优化：关闭密集多图层联合 Hover，屏蔽冗余移动端图例排版，彻底解决手机发热卡死问题
+- 渲染层截断：仅渲染最近 180 根 K 线，解放手机 GPU
+- 杜绝语法崩溃：100% 消除所有硬编码 HTML 尖括号，杜绝剪贴板/浏览器翻译插件破坏代码
 """
 
 from __future__ import annotations
@@ -64,6 +64,11 @@ except (ImportError, ModuleNotFoundError):
     except (ImportError, ModuleNotFoundError):
         from fetcher import fetch, fetch_min, guess_kind, looks_like_code, resolve_name
 
+# 全局安全 HTML 标签生成（绝不使用硬编码尖括号，彻底避免复制时被转义截断）
+HTML_BR = chr(60) + "br" + chr(62)
+HTML_B = chr(60) + "b" + chr(62)
+HTML_B_END = chr(60) + "/b" + chr(62)
+
 st.set_page_config(
     page_title="StockChan 股票与指数缠论分析",
     page_icon="📈",
@@ -73,9 +78,28 @@ st.set_page_config(
 
 # 浅色金融看板样式
 st.markdown(
-    """
-    
-    """,
+    chr(60) + "style" + chr(62) + """
+      .stApp { background: #FFFFFF; color: #1E293B; }
+      [data-testid="stHeader"] { background: rgba(255, 255, 255, 0.95); }
+      .block-container { padding-top: 0.5rem; padding-bottom: 2rem; max-width: 1560px; }
+      
+      div[data-testid="stMetric"] { 
+        background: #F8FAFC; 
+        border: 1px solid #E2E8F0;
+        border-radius: 8px; 
+        padding: 6px 12px;
+      }
+      div[data-testid="stMetricLabel"] p { color: #64748B !important; font-size: 0.8rem; }
+      div[data-testid="stMetricValue"] div { color: #0F172A !important; font-size: 1.25rem !important; font-weight: 700; }
+      
+      .stTextInput>div>div>input { background-color: #F8FAFC !important; color: #0F172A !important; border-color: #CBD5E1 !important; }
+      .stSelectbox>div>div { background-color: #F8FAFC !important; }
+      
+      @media (max-width: 640px) {
+        .block-container { padding: 0.3rem; }
+        h1 { font-size: 1.15rem !important; }
+      }
+    """ + chr(60) + "/style" + chr(62),
     unsafe_allow_html=True,
 )
 
@@ -101,7 +125,7 @@ def normalize_input(value: str, selected_kind: str) -> tuple[str, str]:
         return text.upper(), inferred if inferred in KIND_MAP.values() else selected_kind
     hit = resolve_name(text)
     if hit is None:
-        raise ValueError(f"未能解析「{text}」，请改用 6 位代码。")
+        raise ValueError("未能解析该代码。")
     return hit.code, hit.kind if hit.kind in KIND_MAP.values() else selected_kind
 
 
@@ -172,7 +196,7 @@ try:
             min_p = None
             
         if df is None or df.empty:
-            raise ValueError(f"未能获取到 {symbol} ({period_name}) 的数据，请核对代码。")
+            raise ValueError("未能获取到数据，请核对代码。")
             
         frame = df.copy().reset_index(drop=True)
         frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
@@ -226,7 +250,7 @@ fig.add_trace(go.Candlestick(
     decreasing_line_color="#26D0B8", decreasing_fillcolor="#26D0B8",
 ), row=1, col=1)
 
-# 2. 牛熊分界线 (EMA60)
+# 2. 牛熊分界线 (EMA60 & EMA20)
 if show_bull_bear:
     c_series = frame["close"].astype(float)
     bull_bear_series = c_series.ewm(span=60, adjust=False).mean().iloc[r_start:]
@@ -261,7 +285,7 @@ if show_vwap:
 
 shapes = []
 
-# 5. 跳空缺口 (仅渲染可视范围内的缺口，减少 DOM 节点)
+# 5. 跳空缺口 (仅渲染可视范围内)
 if show_gaps and total_bars >= 2:
     highs = frame["high"].to_numpy(dtype=float)
     lows = frame["low"].to_numpy(dtype=float)
@@ -284,7 +308,7 @@ if show_gaps and total_bars >= 2:
             fillcolor="rgba(38, 166, 154, 0.18)", line=dict(color="#26A69A", width=1, dash="dash"),
         ))
 
-# 6. 缠论中枢矩形 (仅渲染视野内)
+# 6. 缠论中枢矩形
 if show_zs:
     pivots = getattr(result, "zs_list", None) or getattr(result, "pivots", None) or getattr(result, "bi_zs_list", None) or []
     for p in pivots:
@@ -301,7 +325,7 @@ if show_zs:
         else:
             continue
             
-        if x1 < r_start: continue # 剔除远古历史中枢色块，解放手机 GPU
+        if x1 < r_start: continue
         
         if np.isfinite(zd) and np.isfinite(zg) and zg > zd:
             shapes.append(dict(
@@ -386,8 +410,10 @@ for rank, (p_val, i_idx) in enumerate(ress, 1):
         x=[max(r_start, i_idx), x_ext_end], y=[p_val, p_val], mode="lines", 
         line=dict(color="#D32F2F", width=1.5, dash="dash"), showlegend=False, hoverinfo="skip"
     ), row=1, col=1)
+    
+    line_text = HTML_B + "压力" + str(rank) + ": " + f"{p_val:.2f}" + HTML_B_END
     fig.add_annotation(
-        x=x_ext_end, y=p_val, text=f"压力{rank}: {p_val:.2f}",
+        x=x_ext_end, y=p_val, text=line_text,
         showarrow=False, font=dict(color="#D32F2F", size=11, family="Arial Black"),
         xanchor="left", yanchor="bottom", row=1, col=1
     )
@@ -398,8 +424,10 @@ for rank, (p_val, i_idx) in enumerate(sups, 1):
         x=[max(r_start, i_idx), x_ext_end], y=[p_val, p_val], mode="lines", 
         line=dict(color="#1976D2", width=1.5, dash="dash"), showlegend=False, hoverinfo="skip"
     ), row=1, col=1)
+    
+    line_text = HTML_B + "支撑" + str(rank) + ": " + f"{p_val:.2f}" + HTML_B_END
     fig.add_annotation(
-        x=x_ext_end, y=p_val, text=f"支撑{rank}: {p_val:.2f}",
+        x=x_ext_end, y=p_val, text=line_text,
         showarrow=False, font=dict(color="#1976D2", size=11, family="Arial Black"),
         xanchor="left", yanchor="top", row=1, col=1
     )
@@ -421,13 +449,15 @@ if show_wave and waves:
         ), row=1, col=1)
         for w_idx, w_price, w_label, w_kind in wave_points:
             is_top = w_kind.lower() in {"top", "高点", "peak"}
+            
+            wave_text = HTML_B + str(w_label) + HTML_B_END
             fig.add_annotation(
-                x=w_idx, y=w_price, text=f"**{w_label}**", showarrow=False,
+                x=w_idx, y=w_price, text=wave_text, showarrow=False,
                 font=dict(color="#8E24AA" if is_top else "#1565C0", size=13, family="Arial Black"),
                 yshift=14 if is_top else -14, row=1, col=1
             )
 
-# 9. 形态通道
+# 9. 形态通道 (采用纯加法拼接，绝对不使用任何引发断行的语法)
 channel = getattr(result, "channel", None)
 if show_channel and channel and getattr(channel, "valid", False):
     items_to_draw = []
@@ -470,9 +500,173 @@ if show_channel and channel and getattr(channel, "valid", False):
             b_up = float(getattr(struct, "breakout_up_level", 0.0))
             b_down = float(getattr(struct, "breakdown_level", 0.0))
             
-            line1 = "%s %s" % (prefix_str, lbl_str)
+            # 使用最基础的字符串相加，并使用预定义的 HTML_BR 变量
+            line1 = prefix_str + " " + lbl_str
             line2 = "阻力: %.2f 支撑: %.2f" % (b_up, b_down)
             
-            # 精简版通道文字，避免重叠
+            safe_channel_text = line1 + HTML_BR + line2
+            
             fig.add_annotation(
-                x=x_end, y=y_u_end, text="
+                x=x_end, y=y_u_end, text=safe_channel_text,
+                showarrow=False, font=dict(color=color_up, size=9),
+                xanchor="left", yanchor="bottom" if is_primary else "top",
+                align="left", row=1, col=1
+            )
+
+# 10. 买卖点大号五角星
+if show_signals:
+    signals = getattr(result, "signals", None) or getattr(result, "trade_points", None) or []
+    price_span = float(frame_render["high"].max() - frame_render["low"].min())
+    y_offset = price_span * 0.02
+    
+    for s in signals:
+        is_tentative = getattr(s, "tentative", False)
+        if only_confirmed and is_tentative: continue
+        idx = getattr(s, "raw_index", getattr(s, "index", None))
+        price = getattr(s, "price", None)
+        if idx is None or price is None: continue
+        try:
+            idx = int(idx)
+            if idx < r_start: continue
+            price = float(price)
+            is_buy = getattr(s, "side", "") == "buy"
+            label = str(getattr(s, "label", getattr(s, "display", ""))).upper()
+            color = "#FF453A" if is_buy else "#30D158"
+            
+            fig.add_trace(go.Scatter(
+                x=[idx], y=[price], mode="markers",
+                marker=dict(size=14, symbol="star", color=color, line=dict(color="#FFFFFF", width=1.5)), showlegend=False, hoverinfo="skip"
+            ), row=1, col=1)
+            
+            sig_text = HTML_B + str(label) + HTML_B_END
+            fig.add_annotation(
+                x=idx, y=price - y_offset if is_buy else price + y_offset,
+                text=sig_text, showarrow=False, font=dict(color=color, size=13, family="Arial Black"), row=1, col=1
+            )
+        except Exception:
+            pass
+
+# 11. Squeeze / MACD 副图
+if subchart_choice == "Squeeze 动量":
+    squeeze = indicators.get("squeeze")
+    if isinstance(squeeze, pd.DataFrame) and "momentum" in squeeze.columns:
+        m = pd.to_numeric(squeeze["momentum"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        on = np.asarray(squeeze.get("on", np.zeros(len(m), dtype=bool)), dtype=bool)
+    else:
+        c = frame["close"].astype(float)
+        ema20 = c.ewm(span=20, adjust=False).mean()
+        highs = frame["high"].astype(float)
+        lows = frame["low"].astype(float)
+        mid = (highs.rolling(20).max() + lows.rolling(20).min()) / 2 + ema20
+        mid = mid / 2
+        m = (c - mid).rolling(20).mean().fillna(0.0).to_numpy(dtype=float)
+        on = np.zeros(len(m), dtype=bool)
+
+    m_sub = m[r_start:]
+    sqz_colors = ["#FF453A" if val >= 0 else "#26D0B8" for val in m_sub]
+    
+    fig.add_trace(go.Bar(
+        x=x_render, y=m_sub, marker_color=sqz_colors, name="Squeeze动量"
+    ), row=2, col=1)
+    
+    on_sub = on[r_start:]
+    if on_sub.any():
+        fig.add_trace(go.Scatter(
+            x=x_render[on_sub], y=np.zeros(int(on_sub.sum())),
+            mode="markers", marker=dict(size=5, color="#9A9A9F"), name="挤压状态", hoverinfo="skip"
+        ), row=2, col=1)
+        
+    patterns = indicators.get("macd_patterns")
+    if isinstance(patterns, dict):
+        for idx in patterns.get("air_refuel", []):
+            if r_start <= int(idx) < total_bars:
+                fig.add_annotation(
+                    x=int(idx), y=float(m[int(idx)]), text="⚡加油",
+                    showarrow=True, arrowhead=1, arrowcolor="#FFD60A", font=dict(color="#FFD60A", size=11), row=2, col=1
+                )
+        for idx in patterns.get("frost_on_snow", []):
+            if r_start <= int(idx) < total_bars:
+                fig.add_annotation(
+                    x=int(idx), y=float(m[int(idx)]), text="💣雪上加霜",
+                    showarrow=True, arrowhead=1, arrowcolor="#FF453A", font=dict(color="#FF453A", size=11), row=2, col=1
+                )
+else:
+    macd_df = indicators.get("macd")
+    if isinstance(macd_df, pd.DataFrame) and "macd" in macd_df.columns:
+        hist_vals = macd_df["macd"].fillna(0.0).tolist()
+    else:
+        c = frame["close"].astype(float)
+        dif = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
+        dea = dif.ewm(span=9, adjust=False).mean()
+        hist_vals = (2 * (dif - dea)).tolist()
+        
+    m_sub = hist_vals[r_start:]
+    macd_colors = ["#FF453A" if v >= 0 else "#26D0B8" for v in m_sub]
+    fig.add_trace(go.Bar(
+        x=x_render, y=m_sub, marker_color=macd_colors, name="MACD"
+    ), row=2, col=1)
+
+# 动态视野设置
+view_span = min(110, len(x_render))
+y_min = float(frame_render.iloc[-view_span:]["low"].min()) * 0.99
+y_max = float(frame_render.iloc[-view_span:]["high"].max()) * 1.01
+
+fig.update_layout(
+    template="plotly_white",
+    paper_bgcolor="#FFFFFF",
+    plot_bgcolor="#FFFFFF",
+    shapes=shapes,
+    xaxis_rangeslider_visible=False,
+    margin=dict(l=8, r=8, t=10, b=8),
+    height=660,
+    font=dict(color="#475569", family="Segoe UI, sans-serif"),
+    showlegend=False,
+    hovermode="x",
+    dragmode="pan",
+)
+
+tick_step = max(1, len(x_render) // 8)
+tick_vals = list(range(r_start, total_bars, tick_step))
+if (total_bars - 1) not in tick_vals:
+    tick_vals.append(total_bars - 1)
+tick_texts = [date_labels[i] for i in tick_vals]
+
+fig.update_xaxes(
+    tickvals=tick_vals,
+    ticktext=tick_texts,
+    range=[total_bars - view_span, total_bars + 18],
+    showgrid=True,
+    gridcolor="#F1F5F9",
+)
+fig.update_yaxes(
+    range=[y_min, y_max],
+    showgrid=True,
+    gridcolor="#F1F5F9",
+    zerolinecolor="#E2E8F0",
+    row=1, col=1
+)
+
+st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "scrollZoom": True})
+
+# 信号雷达面板
+st.subheader("🎯 实时买卖点雷达")
+trade_points = getattr(result, "signals", None) or getattr(result, "trade_points", []) or []
+signals_list = list(reversed(trade_points))[:6]
+if not signals_list:
+    st.caption("当前区间尚未形成可确认的缠论买卖点。")
+else:
+    for sig in signals_list:
+        is_tentative = getattr(sig, "tentative", False)
+        if only_confirmed and is_tentative:
+            continue
+        is_b = getattr(sig, "side", "buy") == "buy"
+        badge = "🟢" if is_b else "🔴"
+        state = "观察态" if is_tentative else "确定态"
+        price_val = float(getattr(sig, "price", 0.0))
+        sig_label = getattr(sig, "label", getattr(sig, "display", "信号"))
+        disp_txt = f"{badge} **{sig_label}** · {state} · {getattr(sig, 'date', '')} · {price_val:.2f}"
+        reason_txt = f"依据：{getattr(sig, 'reason', '') or '缠论结构判定'}"
+        if is_b:
+            st.success(f"{disp_txt}\n\n{reason_txt}")
+        else:
+            st.error(f"{disp_txt}\n\n{reason_txt}")
